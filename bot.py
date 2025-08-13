@@ -25,7 +25,7 @@ POLL_SECONDS = int(os.getenv("POLL_SECONDS", "180"))
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN ontbreekt in .env / Railway Variables")
 
-STATE_FILE = "last_seen.json"  # {"COD": last_id, "BF": last_id}
+STATE_FILE = "last_seen.json"
 
 # ===== Discord client =====
 intents = discord.Intents.default()
@@ -99,14 +99,14 @@ async def fetch_latest(account: str, limit: int = 10):
             continue
     return []
 
-async def post_new(label: str, channel_id: int, account: str, state_key: str, color: discord.Color):
+async def post_new(label: str, channel_id: int, account: str, state_key: str, color: discord.Color, max_items: int = 1):
     """Plaats nieuwe items in mooie embeds"""
     if not channel_id:
         return
     channel = bot.get_channel(channel_id)
     if not channel:
         return
-    items = await fetch_latest(account, limit=6)
+    items = await fetch_latest(account, limit=max_items)
     if not items:
         return
     last_seen = state.get(state_key)
@@ -129,29 +129,6 @@ async def post_new(label: str, channel_id: int, account: str, state_key: str, co
             except Exception as e:
                 print("Post error:", e)
 
-async def post_last_n(label: str, channel_id: int, account: str, color: discord.Color, n: int):
-    """Forceer het posten van de laatste n berichten (ongeacht last_seen)"""
-    if not channel_id:
-        return
-    channel = bot.get_channel(channel_id)
-    if not channel:
-        return
-    items = await fetch_latest(account, limit=n)
-    if not items:
-        return
-    for t in reversed(items):  # Oud → nieuw
-        embed = discord.Embed(
-            title=f"{label} Update — @{account}",
-            description=t['text'],
-            url=t['url'],
-            color=color,
-            timestamp=t['time']
-        )
-        embed.set_footer(text="Bron: X (Twitter)")
-        if t.get("media"):
-            embed.set_image(url=t["media"])
-        await channel.send(embed=embed)
-
 # ===== background loop =====
 @tasks.loop(seconds=POLL_SECONDS)
 async def poll_loop():
@@ -170,22 +147,35 @@ async def on_ready():
     except Exception as e:
         print("Slash sync fout:", e)
 
+# ===== channel check helper =====
+def wrong_channel(interaction: discord.Interaction, required_id: int) -> bool:
+    return interaction.channel_id != required_id
+
 # ===== slash commands =====
-@tree.command(name="cod_force", description="Post de laatste 3 COD-updates")
+@tree.command(name="cod_force", description="Forceer nu een check voor COD-updates (laatste 3)")
 async def cod_force(interaction: discord.Interaction):
+    if wrong_channel(interaction, CHANNEL_ID_COD):
+        await interaction.response.send_message("⚠️ Deze command werkt alleen in het COD-updates kanaal.", ephemeral=True)
+        return
     await interaction.response.defer(thinking=True)
-    await post_last_n("COD", CHANNEL_ID_COD, FOLLOW_COD, discord.Color.from_str("#FFB300"), 3)
+    await post_new("COD", CHANNEL_ID_COD, FOLLOW_COD, "COD", discord.Color.from_str("#FFB300"), max_items=3)
     await interaction.followup.send("✅ Laatste 3 COD-updates gepost.")
 
-@tree.command(name="bf_force", description="Post de laatste 3 Battlefield-updates")
+@tree.command(name="bf_force", description="Forceer nu een check voor Battlefield-updates (laatste 3)")
 async def bf_force(interaction: discord.Interaction):
+    if wrong_channel(interaction, CHANNEL_ID_BF):
+        await interaction.response.send_message("⚠️ Deze command werkt alleen in het Battlefield-updates kanaal.", ephemeral=True)
+        return
     await interaction.response.defer(thinking=True)
-    await post_last_n("Battlefield", CHANNEL_ID_BF, FOLLOW_BF, discord.Color.from_str("#1E90FF"), 3)
+    await post_new("Battlefield", CHANNEL_ID_BF, FOLLOW_BF, "BF", discord.Color.from_str("#1E90FF"), max_items=3)
     await interaction.followup.send("✅ Laatste 3 Battlefield-updates gepost.")
 
 @tree.command(name="cod_get", description="Haal een eerdere COD-post op (1=nieuwste, 2=vorige, ...)")
 @app_commands.describe(nummer="1 = nieuwste, 2 = vorige, 3 = twee eerder (max 10)")
 async def cod_get(interaction: discord.Interaction, nummer: app_commands.Range[int, 1, 10]):
+    if wrong_channel(interaction, CHANNEL_ID_COD):
+        await interaction.response.send_message("⚠️ Deze command werkt alleen in het COD-updates kanaal.", ephemeral=True)
+        return
     await interaction.response.defer(thinking=True)
     items = await fetch_latest(FOLLOW_COD, limit=nummer)
     if not items or len(items) < nummer:
@@ -206,6 +196,9 @@ async def cod_get(interaction: discord.Interaction, nummer: app_commands.Range[i
 @tree.command(name="bf_get", description="Haal een eerdere BF-post op (1=nieuwste, 2=vorige, ...)")
 @app_commands.describe(nummer="1 = nieuwste, 2 = vorige, 3 = twee eerder (max 10)")
 async def bf_get(interaction: discord.Interaction, nummer: app_commands.Range[int, 1, 10]):
+    if wrong_channel(interaction, CHANNEL_ID_BF):
+        await interaction.response.send_message("⚠️ Deze command werkt alleen in het Battlefield-updates kanaal.", ephemeral=True)
+        return
     await interaction.response.defer(thinking=True)
     items = await fetch_latest(FOLLOW_BF, limit=nummer)
     if not items or len(items) < nummer:
