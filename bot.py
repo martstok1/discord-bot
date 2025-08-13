@@ -112,9 +112,10 @@ async def fetch_cod_rss(limit: int = 3) -> list[dict]:
         # Splits op 'The post' zodat het op een nieuwe alinea komt
         if "The post" in descr:
             parts = descr.split("The post", 1)
-            # Verwijder HTML-tags uit het tweede deel (de post-titel)
+            # Haal de titelregel uit het tweede deel, zonder HTML
             post_text = clean_html(parts[1].lstrip())
-            descr = parts[0].rstrip() + "\n\nThe post " + post_text
+            # Zet 'The post:' op een aparte regel, dan de titelregel, met een lege regel ertussen
+            descr = parts[0].rstrip() + "\n\nThe post:\n" + post_text
         # Splits op 'The post' zodat het op een nieuwe alinea komt
         if "The post" in descr:
             parts = descr.split("The post", 1)
