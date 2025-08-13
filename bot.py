@@ -20,8 +20,11 @@ load_dotenv(dotenv_path=env_path)
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID_COD = int(os.getenv("CHANNEL_ID_COD", "0"))
+CHANNEL_ID_BF = int(os.getenv("CHANNEL_ID_BF", "0"))
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "180"))
-THUMB_URL = "https://i.imgur.com/lT8lJC5.jpeg"  # Vaste COD-logo
+
+THUMB_URL_COD = os.getenv("THUMB_URL_COD", "")
+THUMB_URL_BF = os.getenv("THUMB_URL_BF", "")
 
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN ontbreekt in .env")
@@ -46,23 +49,22 @@ def save_state(state):
 
 state = load_state()
 state.setdefault("COD", None)
+state.setdefault("BF", None)
 
 # ============ helpers ============
 TAG_RE = re.compile(r"<[^>]+>")
 
 def clean_html(text: str, max_len: int = 350) -> str:
-    """Strip HTML + decode entities + nettere spaties + afkappen."""
     if not text:
         return ""
-    text = TAG_RE.sub("", text)  # HTML-tags verwijderen
-    text = html.unescape(text)   # HTML entities decoden
-    text = re.sub(r"\s+", " ", text).strip()  # dubbele spaties weghalen
-    if len(text) > max_len:
+    text = TAG_RE.sub("", text)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if max_len and len(text) > max_len:
         text = text[:max_len - 1].rstrip() + "…"
     return text
 
 def get_article_image(url: str) -> str | None:
-    """Probeer een afbeelding uit de artikelpagina te halen."""
     try:
         r = requests.get(url, timeout=6)
         if r.status_code != 200:
@@ -78,48 +80,36 @@ def get_article_image(url: str) -> str | None:
         print("[WARN] Kan artikel-afbeelding niet ophalen:", e)
     return None
 
-def build_embed(item: dict, title_prefix: str = "COD") -> discord.Embed:
-    """Maak de uiteindelijke embed opmaak."""
+def build_embed(item: dict, thumb_url: str) -> discord.Embed:
+    color = item.get("color", discord.Color.orange())
     embed = discord.Embed(
         title=item["title"],
         description=item["text"],
         url=item["url"],
-        color=discord.Color.orange(),
+        color=color,
         timestamp=item["time"],
     )
-    embed.set_thumbnail(url=THUMB_URL)  # COD logo als thumbnail
-
+    if thumb_url:
+        embed.set_thumbnail(url=thumb_url)
     if item.get("image"):
-        embed.set_image(url=item["image"])  # Grote afbeelding onderaan
-
-    # Footer alleen datum/tijd
+        embed.set_image(url=item["image"])
     pub_time = item["time"].strftime("%d-%m-%Y, %H:%M")
     embed.set_footer(text=pub_time)
-
     return embed
 
-# ============ COD via RSS ============
-async def fetch_cod_rss(limit: int = 3) -> list[dict]:
-    FEED_URL = "https://kotaku.com/tag/call-of-duty/rss"
-    parsed = feedparser.parse(FEED_URL)
+# ============ Fetchers ============
+async def fetch_feed(feed_url: str, limit: int = 3, max_len: int = 350) -> list[dict]:
+    parsed = feedparser.parse(feed_url)
     items: list[dict] = []
 
     for entry in parsed.entries[:limit]:
         ts = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc) if hasattr(entry, "published_parsed") else datetime.now(timezone.utc)
         link = entry.link
         title = entry.title
-        descr = clean_html(getattr(entry, "summary", ""), max_len=350)
-        # Splits op 'The post' zodat het op een nieuwe alinea komt
+        descr = clean_html(getattr(entry, "summary", ""), max_len=max_len)
         if "The post" in descr:
             parts = descr.split("The post", 1)
-            # Haal de titelregel uit het tweede deel, zonder HTML
-            post_text = clean_html(parts[1].lstrip())
-            # Zet 'The post:' op een aparte regel, dan de titelregel, met een lege regel ertussen
-            descr = parts[0].rstrip() + "\n\nThe post:\n" + post_text
-        # Splits op 'The post' zodat het op een nieuwe alinea komt
-        if "The post" in descr:
-            parts = descr.split("The post", 1)
-            descr = parts[0].rstrip() + "\n\nThe post" + parts[1]
+            descr = parts[0].rstrip()
 
         image_url = None
         media_content = getattr(entry, "media_content", None)
@@ -142,45 +132,73 @@ async def fetch_cod_rss(limit: int = 3) -> list[dict]:
 
     return items
 
-# ============ posten / commands ============
+# ============ Post functies ============
 async def post_new_cod():
-    items = await fetch_cod_rss(limit=1)
+    items = await fetch_feed("https://kotaku.com/tag/call-of-duty/rss", limit=1, max_len=350)
     if not items:
         return
-
     latest = items[0]
     last_seen = state.get("COD")
-
     if last_seen is None:
         state["COD"] = latest["id"]
         save_state(state)
-        print("[INFO] Eerste start: laatste artikel onthouden, geen post.")
         return
-
     if latest["id"] != last_seen:
         channel = bot.get_channel(CHANNEL_ID_COD)
         if channel:
-            embed = build_embed(latest, title_prefix="COD")
+            latest["color"] = discord.Color.orange()
+            embed = build_embed(latest, THUMB_URL_COD)
             await channel.send(embed=embed)
         state["COD"] = latest["id"]
         save_state(state)
-        print("[INFO] Nieuw artikel gepost.")
 
-@tree.command(name="cod_last", description="Laatste COD-nieuws (Kotaku)")
+async def post_new_bf():
+    items = await fetch_feed("https://gameranx.com/tag/battlefield/feed/", limit=1, max_len=350)
+    if not items:
+        return
+    latest = items[0]
+    last_seen = state.get("BF")
+    if last_seen is None:
+        state["BF"] = latest["id"]
+        save_state(state)
+        return
+    if latest["id"] != last_seen:
+        channel = bot.get_channel(CHANNEL_ID_BF)
+        if channel:
+            latest["color"] = discord.Color.blue()
+            embed = build_embed(latest, THUMB_URL_BF)
+            await channel.send(embed=embed)
+        state["BF"] = latest["id"]
+        save_state(state)
+
+# ============ Commands ============
+@tree.command(name="cod_last", description="Laatste COD-nieuws")
 async def cod_last(interaction: discord.Interaction):
-    items = await fetch_cod_rss(limit=1)
+    items = await fetch_feed("https://kotaku.com/tag/call-of-duty/rss", limit=1, max_len=350)
     if not items:
         await interaction.response.send_message("Geen nieuws gevonden.")
         return
-    embed = build_embed(items[0], title_prefix="COD")
+    items[0]["color"] = discord.Color.orange()
+    embed = build_embed(items[0], THUMB_URL_COD)
     await interaction.response.send_message(embed=embed)
 
-# ============ background loop ============
+@tree.command(name="bf_last", description="Laatste Battlefield-nieuws")
+async def bf_last(interaction: discord.Interaction):
+    items = await fetch_feed("https://gameranx.com/tag/battlefield/feed/", limit=1, max_len=350)
+    if not items:
+        await interaction.response.send_message("Geen nieuws gevonden.")
+        return
+    items[0]["color"] = discord.Color.blue()
+    embed = build_embed(items[0], THUMB_URL_BF)
+    await interaction.response.send_message(embed=embed)
+
+# ============ Background loop ============
 @tasks.loop(seconds=POLL_SECONDS)
 async def poll_loop():
     await post_new_cod()
+    await post_new_bf()
 
-# ============ lifecycle ============
+# ============ Lifecycle ============
 @bot.event
 async def on_ready():
     print(f"✅ Game Intel Bot ingelogd als {bot.user}")
