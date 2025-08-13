@@ -1,4 +1,5 @@
-import os, json, random
+import os
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 import httpx
@@ -15,15 +16,10 @@ load_dotenv(dotenv_path=env_path)
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID_COD = int(os.getenv("CHANNEL_ID_COD", "0"))
 CHANNEL_ID_BF = int(os.getenv("CHANNEL_ID_BF", "0"))
-
-FOLLOW_COD = os.getenv("FOLLOW_ACCOUNT_COD", "CODUpdates").lstrip("@")
-FOLLOW_BF = os.getenv("FOLLOW_ACCOUNT_BF", "Battlefield").lstrip("@")
-
-NITTER_SOURCES = [s.strip() for s in os.getenv("NITTER_SOURCES", "https://nitter.net,https://nitter.it,https://nitter.lacontrevoie.fr").split(",") if s.strip()]
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "180"))
 
 if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN ontbreekt in .env / Railway Variables")
+    raise RuntimeError("DISCORD_TOKEN ontbreekt in .env")
 
 STATE_FILE = "last_seen.json"
 
@@ -48,118 +44,98 @@ state.setdefault("COD", None)
 state.setdefault("BF", None)
 
 # ===== helpers =====
-async def fetch_latest(account: str, limit: int = 10):
-    """Haal laatste posts van een X-account via random Nitter mirror"""
+async def fetch_cod_news(limit=3):
+    """Haal laatste COD-nieuws op van GameRant"""
+    url = "https://gamerant.com/call-of-duty-news/"
     headers = {"User-Agent": "Mozilla/5.0"}
-    tried_sources = set()
     items = []
 
-    print(f"[DEBUG] Start fetch voor account: {account}")
+    async with httpx.AsyncClient(timeout=25, headers=headers) as client:
+        r = await client.get(url)
+    if r.status_code != 200:
+        print(f"[COD] Fout bij ophalen: {r.status_code}")
+        return []
 
-    while len(tried_sources) < len(NITTER_SOURCES):
-        base = random.choice(NITTER_SOURCES)
-        if base in tried_sources:
+    soup = BeautifulSoup(r.text, "html.parser")
+    articles = soup.select("article")[:limit]
+    for art in articles:
+        a_tag = art.select_one("a")
+        if not a_tag:
             continue
-        tried_sources.add(base)
+        link = a_tag.get("href")
+        title = a_tag.get_text(strip=True)
+        ts = datetime.now(timezone.utc)
+        items.append({
+            "id": link,
+            "url": link,
+            "text": title,
+            "time": ts,
+            "media": None
+        })
+    return items
 
-        url = f"{base.rstrip('/')}/{account}"
-        print(f"[DEBUG] Ophalen vanaf: {url}")
+async def fetch_bf_news(limit=3):
+    """Haal laatste Battlefield-nieuws op van EA"""
+    url = "https://www.ea.com/games/battlefield/battlefield-6/news"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    items = []
 
-        try:
-            async with httpx.AsyncClient(timeout=25, headers=headers, follow_redirects=True) as client:
-                r = await client.get(url)
+    async with httpx.AsyncClient(timeout=25, headers=headers) as client:
+        r = await client.get(url)
+    if r.status_code != 200:
+        print(f"[BF] Fout bij ophalen: {r.status_code}")
+        return []
 
-            print(f"[DEBUG] Statuscode: {r.status_code}")
-
-            if r.status_code == 429:
-                print(f"[DEBUG] Rate limited op {base}, andere mirror proberen...")
-                continue
-            if r.status_code != 200:
-                continue
-
-            soup = BeautifulSoup(r.text, "html.parser")
-            timeline = soup.select("div.timeline > div.timeline-item")
-            print(f"[DEBUG] Gevonden timeline items: {len(timeline)}")
-
-            for item in timeline[:max(10, limit)]:
-                a = item.select_one("a.tweet-date")
-                if not a or not a.get("href"):
-                    continue
-                link = a["href"]
-                if "/status/" not in link:
-                    continue
-                tw_id = link.split("/status/")[-1].split("?")[0]
-                tw_url = f"https://x.com/{account}/status/{tw_id}"
-                content = item.select_one("div.tweet-content")
-                text = content.get_text("\n", strip=True) if content else "(geen tekst)"
-                time_tag = item.select_one("span.tweet-date > a > time")
-                ts = datetime.fromisoformat(time_tag["datetime"].replace("Z", "+00:00")) if time_tag and time_tag.has_attr("datetime") else datetime.now(timezone.utc)
-
-                # Media zoeken
-                media_url = None
-                img_tag = item.select_one("a.still-image img")
-                if img_tag and img_tag.get("src"):
-                    media_url = img_tag["src"]
-                else:
-                    vid_tag = item.select_one("video > source")
-                    if vid_tag and vid_tag.get("src"):
-                        media_url = vid_tag["src"]
-
-                items.append({
-                    "id": tw_id,
-                    "url": tw_url,
-                    "text": text,
-                    "time": ts,
-                    "media": media_url
-                })
-
-            if items:
-                items.sort(key=lambda x: x["time"], reverse=True)
-                return items[:limit]
-
-        except Exception as e:
-            print(f"[DEBUG] Fout bij ophalen van {url}: {e}")
+    soup = BeautifulSoup(r.text, "html.parser")
+    articles = soup.select("li.article-tile")[:limit]
+    for art in articles:
+        a_tag = art.select_one("a")
+        if not a_tag:
             continue
+        link = "https://www.ea.com" + a_tag.get("href")
+        title = art.get_text(strip=True)
+        ts = datetime.now(timezone.utc)
+        items.append({
+            "id": link,
+            "url": link,
+            "text": title,
+            "time": ts,
+            "media": None
+        })
+    return items
 
-    print("[DEBUG] Geen resultaten gevonden bij alle mirrors.")
-    return []
-
-async def post_new(label: str, channel_id: int, account: str, state_key: str, color: discord.Color, max_posts=3):
-    """Plaats nieuwe items in mooie embeds"""
+async def post_new(label, channel_id, fetch_func, state_key, color):
     if not channel_id:
         return
     channel = bot.get_channel(channel_id)
     if not channel:
         return
-    items = await fetch_latest(account, limit=max_posts)
+    items = await fetch_func(limit=3)
     if not items:
         return
     last_seen = state.get(state_key)
     for t in sorted(items, key=lambda x: x["time"]):
-        if last_seen is None or t["id"] > last_seen:
+        if last_seen is None or t["id"] != last_seen:
             embed = discord.Embed(
-                title=f"{label} Update — @{account}",
+                title=f"{label} Update",
                 description=t['text'],
                 url=t['url'],
                 color=color,
                 timestamp=t['time']
             )
-            embed.set_footer(text="Bron: X (Twitter)")
+            embed.set_footer(text="Bron: Officiële website")
             if t.get("media"):
                 embed.set_image(url=t["media"])
-            try:
-                await channel.send(embed=embed)
-                state[state_key] = t["id"]
-                save_state(state)
-            except Exception as e:
-                print("Post error:", e)
+            await channel.send(embed=embed)
+            state[state_key] = t["id"]
+            save_state(state)
 
 # ===== background loop =====
 @tasks.loop(seconds=POLL_SECONDS)
 async def poll_loop():
     print("[DEBUG] Polling gestart...")
-    await post_new("COD", CHANNEL_ID_COD, FOLLOW_COD, "COD", discord.Color.from_str("#FFB300"))
-    await post_new("Battlefield", CHANNEL_ID_BF, FOLLOW_BF, "BF", discord.Color.from_str("#1E90FF"))
+    await post_new("COD", CHANNEL_ID_COD, fetch_cod_news, "COD", discord.Color.orange())
+    await post_new("Battlefield", CHANNEL_ID_BF, fetch_bf_news, "BF", discord.Color.blue())
 
 # ===== lifecycle =====
 @bot.event
@@ -172,70 +148,5 @@ async def on_ready():
         print("✅ Slash commands gesynchroniseerd")
     except Exception as e:
         print("Slash sync fout:", e)
-
-# ===== slash commands =====
-@tree.command(name="cod_force", description="Forceer nu een check voor COD-updates")
-async def cod_force(interaction: discord.Interaction):
-    if interaction.channel_id != CHANNEL_ID_COD:
-        await interaction.response.send_message("⚠️ Dit commando kan alleen in het COD-updates kanaal gebruikt worden.", ephemeral=True)
-        return
-    await interaction.response.defer(thinking=True)
-    await post_new("COD", CHANNEL_ID_COD, FOLLOW_COD, "COD", discord.Color.from_str("#FFB300"), max_posts=3)
-    await interaction.followup.send("✅ Laatste 3 COD-updates gepost.")
-
-@tree.command(name="bf_force", description="Forceer nu een check voor Battlefield-updates")
-async def bf_force(interaction: discord.Interaction):
-    if interaction.channel_id != CHANNEL_ID_BF:
-        await interaction.response.send_message("⚠️ Dit commando kan alleen in het Battlefield-updates kanaal gebruikt worden.", ephemeral=True)
-        return
-    await interaction.response.defer(thinking=True)
-    await post_new("Battlefield", CHANNEL_ID_BF, FOLLOW_BF, "BF", discord.Color.from_str("#1E90FF"), max_posts=3)
-    await interaction.followup.send("✅ Laatste 3 Battlefield-updates gepost.")
-
-@tree.command(name="cod_get", description="Haal een eerdere COD-post op (1=nieuwste, 2=vorige, ...)")
-@app_commands.describe(nummer="1 = nieuwste, 2 = vorige, 3 = twee eerder (max 10)")
-async def cod_get(interaction: discord.Interaction, nummer: app_commands.Range[int, 1, 10]):
-    if interaction.channel_id != CHANNEL_ID_COD:
-        await interaction.response.send_message("⚠️ Dit commando kan alleen in het COD-updates kanaal gebruikt worden.", ephemeral=True)
-        return
-    await interaction.response.defer(thinking=True)
-    items = await fetch_latest(FOLLOW_COD, limit=nummer)
-    if not items or len(items) < nummer:
-        await interaction.followup.send("⚠️ Geen item gevonden, probeer later opnieuw.")
-        return
-    t = items[nummer - 1]
-    embed = discord.Embed(
-        title=f"COD Update #{nummer} — @{FOLLOW_COD}",
-        description=t['text'],
-        url=t['url'],
-        color=discord.Color.from_str("#FFB300"),
-        timestamp=t['time']
-    )
-    if t.get("media"):
-        embed.set_image(url=t["media"])
-    await interaction.followup.send(embed=embed)
-
-@tree.command(name="bf_get", description="Haal een eerdere BF-post op (1=nieuwste, 2=vorige, ...)")
-@app_commands.describe(nummer="1 = nieuwste, 2 = vorige, 3 = twee eerder (max 10)")
-async def bf_get(interaction: discord.Interaction, nummer: app_commands.Range[int, 1, 10]):
-    if interaction.channel_id != CHANNEL_ID_BF:
-        await interaction.response.send_message("⚠️ Dit commando kan alleen in het Battlefield-updates kanaal gebruikt worden.", ephemeral=True)
-        return
-    await interaction.response.defer(thinking=True)
-    items = await fetch_latest(FOLLOW_BF, limit=nummer)
-    if not items or len(items) < nummer:
-        await interaction.followup.send("⚠️ Geen item gevonden, probeer later opnieuw.")
-        return
-    t = items[nummer - 1]
-    embed = discord.Embed(
-        title=f"Battlefield Update #{nummer} — @{FOLLOW_BF}",
-        description=t['text'],
-        url=t['url'],
-        color=discord.Color.from_str("#1E90FF"),
-        timestamp=t['time']
-    )
-    if t.get("media"):
-        embed.set_image(url=t["media"])
-    await interaction.followup.send(embed=embed)
 
 bot.run(TOKEN)
