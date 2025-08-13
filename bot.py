@@ -1,164 +1,213 @@
+# bot.py
 import os
 import json
+import html as html_lib
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urljoin
+
+import requests
+import feedparser
 import discord
 from discord.ext import tasks
 from discord import app_commands
-from dotenv import load_dotenv
-import feedparser
-import requests
 from bs4 import BeautifulSoup
-import re
+from dotenv import load_dotenv
 
-# ===== .env laden =====
-env_path = Path(__file__).with_name('.env')
+# ========== Config / .env ==========
+env_path = Path(__file__).with_name(".env")
 load_dotenv(dotenv_path=env_path)
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID_COD = int(os.getenv("CHANNEL_ID_COD", "0"))
-POLL_SECONDS = int(os.getenv("POLL_SECONDS", "180"))
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "300"))  # elke 5 min standaard
 
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN ontbreekt in .env")
 
 STATE_FILE = "last_seen.json"
-KOTAKU_LOGO = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5c/Kotaku_logo.svg/320px-Kotaku_logo.svg.png"
+KOTAKU_FEED = "https://kotaku.com/tag/call-of-duty/rss"
+KOTAKU_LOGO = "https://upload.wikimedia.org/wikipedia/commons/5/58/Kotaku_2018_logo.svg"
 
-# ===== Discord client =====
+# ========== Discord client ==========
 intents = discord.Intents.default()
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
 
-# ===== persistent state =====
-def load_state():
+# ========== Persistent state ==========
+def load_state() -> dict:
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            try:
+                return json.load(f)
+            except Exception:
+                return {}
     return {}
 
-def save_state(state):
+def save_state(state: dict) -> None:
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 state = load_state()
 state.setdefault("COD", None)
 
-# ===== helpers =====
-def strip_html(html):
-    """Verwijder HTML-tags en maak korte samenvatting"""
-    text = re.sub(r"<.*?>", "", html)  # verwijder tags
-    text = re.sub(r"\s+", " ", text).strip()
+# ========== Helpers ==========
+SESSION = requests.Session()
+SESSION.headers.update(
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+)
+
+def clean_summary(summary_html: str, max_len: int = 320) -> str:
+    """Strip alle HTML en decodeer entiteiten; knip op nette lengte."""
+    if not summary_html:
+        return ""
+    # HTML -> tekst
+    soup = BeautifulSoup(summary_html, "html.parser")
+    text = soup.get_text(" ", strip=True)
+    text = html_lib.unescape(text)
+    # Net knippen
+    if len(text) > max_len:
+        text = text[: max_len - 1].rstrip() + "…"
     return text
 
-def get_article_image(url):
-    """Haal eerste afbeelding uit artikel"""
+def get_article_image(url: str) -> str | None:
+    """Pak og:image of eerste <img> uit artikelpagina."""
     try:
-        r = requests.get(url, timeout=5)
+        r = SESSION.get(url, timeout=8)
+        if r.status_code != 200:
+            return None
         soup = BeautifulSoup(r.text, "html.parser")
-        img_tag = soup.find("img")
-        if img_tag and img_tag.get("src"):
-            return img_tag["src"]
+
+        # 1) Open Graph
+        og = soup.find("meta", property="og:image")
+        if og and og.get("content"):
+            return urljoin(url, og["content"])
+
+        # 2) Twitter card
+        tw = soup.find("meta", attrs={"name": "twitter:image"})
+        if tw and tw.get("content"):
+            return urljoin(url, tw["content"])
+
+        # 3) Eerste plaatje in content
+        img = soup.find("img")
+        if img and img.get("src"):
+            return urljoin(url, img["src"])
     except Exception as e:
         print("[WARN] Kan afbeelding niet ophalen:", e)
     return None
 
-# ===== COD via RSS =====
-async def fetch_cod_rss(limit=3):
-    """Haal COD nieuws op via Kotaku RSS"""
-    feed_url = "https://kotaku.com/tag/call-of-duty/rss"
-    parsed = feedparser.parse(feed_url)
-    items = []
+def fmt_timestamp(ts: datetime) -> str:
+    # NL notatie: dd-mm-jjjj, HH:MM
+    return ts.astimezone(timezone.utc).strftime("%d-%m-%Y, %H:%M")
+
+# ========== Data ophalen ==========
+def fetch_cod_articles(limit: int = 1) -> list[dict]:
+    """Lees Kotaku RSS en geef lijst met dicts: id, url, title, summary, time, image."""
+    parsed = feedparser.parse(KOTAKU_FEED)
+    items: list[dict] = []
 
     for entry in parsed.entries[:limit]:
-        ts = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-        clean_link = entry.link
+        # publicatietijd
+        ts = (
+            datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+            if getattr(entry, "published_parsed", None)
+            else datetime.now(timezone.utc)
+        )
+        link = entry.link
+        title = html_lib.unescape(entry.title)
 
-        # Samenvatting opschonen
-        summary_text = strip_html(entry.summary) if "summary" in entry else "Geen beschrijving beschikbaar."
+        # Samenvatting netjes
+        summary_html = getattr(entry, "summary", "")
+        summary = clean_summary(summary_html)
 
-        # Probeer afbeelding te vinden
-        image_url = get_article_image(clean_link)
+        # Probeer eerst feed media, anders scrape
+        image_url = None
+        if hasattr(entry, "media_content") and entry.media_content:
+            image_url = entry.media_content[0].get("url")
+        if not image_url and hasattr(entry, "media_thumbnail") and entry.media_thumbnail:
+            image_url = entry.media_thumbnail[0].get("url")
+        if not image_url:
+            image_url = get_article_image(link)
 
-        items.append({
-            "id": clean_link,
-            "url": clean_link,
-            "title": entry.title,
-            "summary": summary_text,
-            "time": ts,
-            "image": image_url
-        })
+        items.append(
+            {
+                "id": link,          # uniek genoeg
+                "url": link,
+                "title": title,
+                "summary": summary,
+                "time": ts,
+                "image": image_url,
+            }
+        )
 
     return items
 
-# ===== post nieuwe COD update =====
-async def post_new_cod():
-    items = await fetch_cod_rss(limit=1)  # Alleen nieuwste ophalen
+# ========== Embed builder ==========
+def build_embed(item: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title=item["title"],
+        url=item["url"],
+        description=item.get("summary") or "",
+        color=discord.Color.orange(),
+        timestamp=item["time"],
+    )
+    # thumbnail = site logo
+    embed.set_thumbnail(url=KOTAKU_LOGO)
+
+    # grote afbeelding onderaan
+    if item.get("image"):
+        embed.set_image(url=item["image"])
+
+    # footer met datum/tijd
+    embed.set_footer(text=fmt_timestamp(item["time"]))
+    return embed
+
+# ========== Auto-Poster (alleen nieuwe) ==========
+async def post_new_cod_if_any():
+    """Check laatste artikel; post alleen als nieuw. Eerste run: alleen onthouden."""
+    items = fetch_cod_articles(limit=1)
     if not items:
         return
-
-    latest_item = items[0]
+    latest = items[0]
     last_seen = state.get("COD")
 
-    # Eerste keer alleen onthouden
+    # Eerste run: alleen onthouden
     if last_seen is None:
-        state["COD"] = latest_item["id"]
+        state["COD"] = latest["id"]
         save_state(state)
         print("[INFO] Eerste start: laatste artikel onthouden, geen post.")
         return
 
-    # Alleen posten als het nieuw is
-    if latest_item["id"] != last_seen:
+    # Nieuw? Posten!
+    if latest["id"] != last_seen:
         channel = bot.get_channel(CHANNEL_ID_COD)
         if channel:
-            embed = discord.Embed(
-                title=latest_item['title'],
-                description=latest_item['summary'],
-                url=latest_item['url'],
-                color=discord.Color.orange(),
-                timestamp=latest_item['time']
-            )
-            embed.set_thumbnail(url=KOTAKU_LOGO)
-            if latest_item.get('image'):
-                embed.set_image(url=latest_item['image'])
-                embed.set_footer(icon_url=latest_item['image'], text=" ")
-
+            embed = build_embed(latest)
             await channel.send(embed=embed)
-
-        state["COD"] = latest_item["id"]
+            print("[INFO] Nieuw artikel gepost.")
+        state["COD"] = latest["id"]
         save_state(state)
-        print("[INFO] Nieuw artikel gepost.")
 
-# ===== test command =====
-@tree.command(name="cod_last", description="Laatste COD nieuwsbericht")
+# ========== Slash Commands ==========
+@tree.command(name="cod_last", description="Toon het laatste COD-nieuws (Kotaku)")
 async def cod_last(interaction: discord.Interaction):
-    items = await fetch_cod_rss(limit=1)
+    items = fetch_cod_articles(limit=1)
     if not items:
-        await interaction.response.send_message("Geen nieuws gevonden.")
+        await interaction.response.send_message("Geen nieuws gevonden.", ephemeral=True)
         return
-
-    t = items[0]
-    embed = discord.Embed(
-        title=t['title'],
-        description=t['summary'],
-        url=t['url'],
-        color=discord.Color.orange(),
-        timestamp=t['time']
-    )
-    embed.set_thumbnail(url=KOTAKU_LOGO)
-    if t.get("image"):
-        embed.set_image(url=t["image"])
-        embed.set_footer(icon_url=t["image"], text=" ")
-
+    embed = build_embed(items[0])
     await interaction.response.send_message(embed=embed)
 
-# ===== background loop =====
+# ========== Background loop ==========
 @tasks.loop(seconds=POLL_SECONDS)
 async def poll_loop():
-    print("[DEBUG] Polling gestart...")
-    await post_new_cod()
+    print("[DEBUG] Polling…")
+    await post_new_cod_if_any()
 
-# ===== lifecycle =====
+# ========== Lifecycle ==========
 @bot.event
 async def on_ready():
     print(f"✅ Game Intel Bot ingelogd als {bot.user}")
@@ -170,4 +219,5 @@ async def on_ready():
     except Exception as e:
         print("Slash sync fout:", e)
 
+# ========== Start ==========
 bot.run(TOKEN)
