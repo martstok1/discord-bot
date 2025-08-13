@@ -21,8 +21,7 @@ load_dotenv(dotenv_path=env_path)
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID_COD = int(os.getenv("CHANNEL_ID_COD", "0"))
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "180"))
-# Vaste thumbnail (logo). Zet bij voorkeur zelf in Railway als THUMB_URL.
-THUMB_URL = os.getenv("THUMB_URL", "https://www.kotaku.com/favicon.ico")
+THUMB_URL = "https://i.imgur.com/lT8lJC5.jpeg"  # Vaste COD-logo
 
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN ontbreekt in .env")
@@ -55,29 +54,23 @@ def clean_html(text: str, max_len: int = 350) -> str:
     """Strip HTML + decode entities + nettere spaties + afkappen."""
     if not text:
         return ""
-    # strip tags
-    text = TAG_RE.sub("", text)
-    # decode entities
-    text = html.unescape(text)
-    # collapsing whitespace
-    text = re.sub(r"\s+", " ", text).strip()
-    # shorten
+    text = TAG_RE.sub("", text)  # HTML-tags verwijderen
+    text = html.unescape(text)   # HTML entities decoden
+    text = re.sub(r"\s+", " ", text).strip()  # dubbele spaties weghalen
     if len(text) > max_len:
         text = text[:max_len - 1].rstrip() + "…"
     return text
 
 def get_article_image(url: str) -> str | None:
-    """Probeer een afbeelding uit de artikelpagina te halen (og:image of 1e <img>)."""
+    """Probeer een afbeelding uit de artikelpagina te halen."""
     try:
         r = requests.get(url, timeout=6)
         if r.status_code != 200:
             return None
         soup = BeautifulSoup(r.text, "html.parser")
-        # og:image eerst
         og = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "og:image"})
         if og and og.get("content"):
             return og["content"]
-        # anders eerste <img>
         img = soup.find("img")
         if img and img.get("src"):
             return img["src"]
@@ -94,47 +87,29 @@ def build_embed(item: dict, title_prefix: str = "COD") -> discord.Embed:
         color=discord.Color.orange(),
         timestamp=item["time"],
     )
-    # vaste logo bovenin
-    if THUMB_URL:
-        embed.set_thumbnail(url=THUMB_URL)
+    embed.set_thumbnail(url=THUMB_URL)  # COD logo als thumbnail
 
-    # grote afbeelding onderaan
     if item.get("image"):
-        embed.set_image(url=item["image"])
+        embed.set_image(url=item["image"])  # Grote afbeelding onderaan
 
-    # footer: alleen icoontje (zelfde image), geen tekst
-    if item.get("image"):
-        embed.set_footer(text="\u200b", icon_url=item["image"])
-    else:
-        embed.set_footer(text="\u200b")
+    # Footer alleen datum/tijd
+    pub_time = item["time"].strftime("%d-%m-%Y, %H:%M")
+    embed.set_footer(text=pub_time)
 
     return embed
 
 # ============ COD via RSS ============
 async def fetch_cod_rss(limit: int = 3) -> list[dict]:
-    """
-    Haal COD nieuws op via Kotaku RSS
-    https://kotaku.com/tag/call-of-duty/rss
-    """
     FEED_URL = "https://kotaku.com/tag/call-of-duty/rss"
     parsed = feedparser.parse(FEED_URL)
     items: list[dict] = []
 
     for entry in parsed.entries[:limit]:
-        # tijd
-        ts = None
-        if hasattr(entry, "published_parsed") and entry.published_parsed:
-            ts = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-        else:
-            ts = datetime.now(timezone.utc)
-
+        ts = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc) if hasattr(entry, "published_parsed") else datetime.now(timezone.utc)
         link = entry.link
         title = entry.title
-        # summary kan HTML bevatten
-        summary_html = getattr(entry, "summary", "")
-        descr = clean_html(summary_html, max_len=350)
+        descr = clean_html(getattr(entry, "summary", ""), max_len=350)
 
-        # afbeelding uit feed als beschikbaar
         image_url = None
         media_content = getattr(entry, "media_content", None)
         media_thumb = getattr(entry, "media_thumbnail", None)
@@ -142,26 +117,22 @@ async def fetch_cod_rss(limit: int = 3) -> list[dict]:
             image_url = media_content[0]["url"]
         elif media_thumb and len(media_thumb) > 0 and media_thumb[0].get("url"):
             image_url = media_thumb[0]["url"]
-        # fallback: scrape artikelpagina
         if not image_url:
             image_url = get_article_image(link)
 
-        items.append(
-            {
-                "id": link,        # uniek genoeg
-                "url": link,
-                "title": title,
-                "text": descr or title,  # als er geen nette summary is, val terug op titel
-                "time": ts,
-                "image": image_url,
-            }
-        )
+        items.append({
+            "id": link,
+            "url": link,
+            "title": title,
+            "text": descr or title,
+            "time": ts,
+            "image": image_url,
+        })
 
     return items
 
 # ============ posten / commands ============
 async def post_new_cod():
-    """Post automatisch alleen als er echt een nieuwe is."""
     items = await fetch_cod_rss(limit=1)
     if not items:
         return
@@ -169,7 +140,6 @@ async def post_new_cod():
     latest = items[0]
     last_seen = state.get("COD")
 
-    # eerste run: alleen onthouden
     if last_seen is None:
         state["COD"] = latest["id"]
         save_state(state)
@@ -197,7 +167,6 @@ async def cod_last(interaction: discord.Interaction):
 # ============ background loop ============
 @tasks.loop(seconds=POLL_SECONDS)
 async def poll_loop():
-    # check alleen of er ECHT iets nieuws is
     await post_new_cod()
 
 # ============ lifecycle ============
