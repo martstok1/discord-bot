@@ -42,16 +42,20 @@ state.setdefault("COD", None)
 
 # ===== COD via RSS =====
 async def fetch_cod_rss(limit=3):
-    """Haal COD nieuws op via CharlieIntel RSS"""
-    feed_url = "https://www.charlieintel.com/feed/"
+    """Haal COD nieuws op via Kotaku RSS"""
+    feed_url = "https://kotaku.com/tag/call-of-duty/rss"
     parsed = feedparser.parse(feed_url)
     items = []
 
     for entry in parsed.entries[:limit]:
         ts = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+
+        # Link opschonen
+        clean_link = entry.link.replace("https://editors.", "https://").replace("http://editors.", "http://")
+
         items.append({
-            "id": entry.link,
-            "url": entry.link,
+            "id": clean_link,
+            "url": clean_link,
             "text": entry.title,
             "time": ts
         })
@@ -61,12 +65,14 @@ async def post_new_cod():
     channel = bot.get_channel(CHANNEL_ID_COD)
     if not channel:
         return
+
     items = await fetch_cod_rss(limit=3)
     if not items:
         return
+
     last_seen = state.get("COD")
     for t in sorted(items, key=lambda x: x["time"]):
-        if last_seen is None or t["id"] != last_seen:
+        if last_seen != t["id"]:  # Alleen posten als het nieuw is
             embed = discord.Embed(
                 title="COD Update",
                 description=t['text'],
@@ -74,7 +80,7 @@ async def post_new_cod():
                 color=discord.Color.orange(),
                 timestamp=t['time']
             )
-            embed.set_footer(text="Bron: CharlieIntel RSS")
+            embed.set_footer(text="Bron: Kotaku RSS")
             await channel.send(embed=embed)
             state["COD"] = t["id"]
             save_state(state)
@@ -94,7 +100,7 @@ async def cod_last(interaction: discord.Interaction):
         color=discord.Color.orange(),
         timestamp=t['time']
     )
-    embed.set_footer(text="Bron: CharlieIntel RSS")
+    embed.set_footer(text="Bron: Kotaku RSS")
     await interaction.response.send_message(embed=embed)
 
 # ===== background loop =====
