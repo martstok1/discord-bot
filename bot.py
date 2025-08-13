@@ -1,6 +1,5 @@
 import os
 import json
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 import discord
@@ -8,6 +7,8 @@ from discord.ext import tasks
 from discord import app_commands
 from dotenv import load_dotenv
 import feedparser
+import requests
+from bs4 import BeautifulSoup
 
 # ===== .env laden =====
 env_path = Path(__file__).with_name('.env')
@@ -41,9 +42,20 @@ def save_state(state):
 state = load_state()
 state.setdefault("COD", None)
 
+# ===== scrape grote artikelafbeelding =====
+def get_article_image(url):
+    try:
+        r = requests.get(url, timeout=5)
+        soup = BeautifulSoup(r.text, "html.parser")
+        meta_img = soup.find("meta", property="og:image")
+        if meta_img and meta_img.get("content"):
+            return meta_img["content"]
+    except Exception as e:
+        print("[WARN] Kan afbeelding niet ophalen:", e)
+    return None
+
 # ===== COD via RSS =====
 async def fetch_cod_rss(limit=3):
-    """Haal COD nieuws op via Kotaku RSS"""
     feed_url = "https://kotaku.com/tag/call-of-duty/rss"
     parsed = feedparser.parse(feed_url)
     items = []
@@ -52,12 +64,16 @@ async def fetch_cod_rss(limit=3):
         ts = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
         clean_link = entry.link
 
-        # Probeer afbeelding te vinden
+        # Probeer afbeelding te vinden uit RSS
         image_url = None
         if 'media_content' in entry and len(entry.media_content) > 0:
             image_url = entry.media_content[0].get('url')
         elif 'media_thumbnail' in entry and len(entry.media_thumbnail) > 0:
             image_url = entry.media_thumbnail[0].get('url')
+
+        # Als RSS geen afbeelding heeft → haal van artikelpagina
+        if not image_url:
+            image_url = get_article_image(clean_link)
 
         items.append({
             "id": clean_link,
@@ -69,10 +85,9 @@ async def fetch_cod_rss(limit=3):
 
     return items
 
-
 # ===== post nieuwe COD update =====
 async def post_new_cod():
-    items = await fetch_cod_rss(limit=1)  # Alleen nieuwste ophalen
+    items = await fetch_cod_rss(limit=1)
     if not items:
         return
 
@@ -106,7 +121,6 @@ async def post_new_cod():
         state["COD"] = latest_item["id"]
         save_state(state)
         print("[INFO] Nieuw artikel gepost.")
-
 
 # ===== test command =====
 @tree.command(name="cod_last", description="Laatste COD nieuwsbericht")
