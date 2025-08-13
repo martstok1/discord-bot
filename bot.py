@@ -109,6 +109,16 @@ async def fetch_cod_rss(limit: int = 3) -> list[dict]:
         link = entry.link
         title = entry.title
         descr = clean_html(getattr(entry, "summary", ""), max_len=350)
+        # Splits op 'The post' zodat het op een nieuwe alinea komt
+        if "The post" in descr:
+            parts = descr.split("The post", 1)
+            # Verwijder HTML-tags uit het tweede deel (de post-titel)
+            post_text = clean_html(parts[1].lstrip())
+            descr = parts[0].rstrip() + "\n\nThe post " + post_text
+        # Splits op 'The post' zodat het op een nieuwe alinea komt
+        if "The post" in descr:
+            parts = descr.split("The post", 1)
+            descr = parts[0].rstrip() + "\n\nThe post" + parts[1]
 
         image_url = None
         media_content = getattr(entry, "media_content", None)
