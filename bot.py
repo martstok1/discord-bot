@@ -50,28 +50,31 @@ async def fetch_cod_news(limit=3):
     headers = {"User-Agent": "Mozilla/5.0"}
     items = []
 
-    async with httpx.AsyncClient(timeout=25, headers=headers) as client:
-        r = await client.get(url)
-    if r.status_code != 200:
-        print(f"[COD] Fout bij ophalen: {r.status_code}")
-        return []
+    try:
+        async with httpx.AsyncClient(timeout=25, headers=headers) as client:
+            r = await client.get(url)
+        if r.status_code != 200:
+            print(f"[COD] Fout bij ophalen: {r.status_code}")
+            return []
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    articles = soup.select("article")[:limit]
-    for art in articles:
-        a_tag = art.select_one("a")
-        if not a_tag:
-            continue
-        link = a_tag.get("href")
-        title = a_tag.get_text(strip=True)
-        ts = datetime.now(timezone.utc)
-        items.append({
-            "id": link,
-            "url": link,
-            "text": title,
-            "time": ts,
-            "media": None
-        })
+        soup = BeautifulSoup(r.text, "html.parser")
+        articles = soup.select("article")[:limit]
+        for art in articles:
+            a_tag = art.select_one("a")
+            if not a_tag:
+                continue
+            link = a_tag.get("href")
+            title = a_tag.get_text(strip=True)
+            ts = datetime.now(timezone.utc)
+            items.append({
+                "id": link,
+                "url": link,
+                "text": title,
+                "time": ts,
+                "media": None
+            })
+    except Exception as e:
+        print(f"[COD] Fout bij ophalen nieuws: {e}")
     return items
 
 async def fetch_bf_news(limit=3):
@@ -80,28 +83,31 @@ async def fetch_bf_news(limit=3):
     headers = {"User-Agent": "Mozilla/5.0"}
     items = []
 
-    async with httpx.AsyncClient(timeout=25, headers=headers) as client:
-        r = await client.get(url)
-    if r.status_code != 200:
-        print(f"[BF] Fout bij ophalen: {r.status_code}")
-        return []
+    try:
+        async with httpx.AsyncClient(timeout=25, headers=headers) as client:
+            r = await client.get(url)
+        if r.status_code != 200:
+            print(f"[BF] Fout bij ophalen: {r.status_code}")
+            return []
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    articles = soup.select("li.article-tile")[:limit]
-    for art in articles:
-        a_tag = art.select_one("a")
-        if not a_tag:
-            continue
-        link = "https://www.ea.com" + a_tag.get("href")
-        title = art.get_text(strip=True)
-        ts = datetime.now(timezone.utc)
-        items.append({
-            "id": link,
-            "url": link,
-            "text": title,
-            "time": ts,
-            "media": None
-        })
+        soup = BeautifulSoup(r.text, "html.parser")
+        articles = soup.select("li.article-tile")[:limit]
+        for art in articles:
+            a_tag = art.select_one("a")
+            if not a_tag:
+                continue
+            link = "https://www.ea.com" + a_tag.get("href")
+            title = art.get_text(strip=True)
+            ts = datetime.now(timezone.utc)
+            items.append({
+                "id": link,
+                "url": link,
+                "text": title,
+                "time": ts,
+                "media": None
+            })
+    except Exception as e:
+        print(f"[BF] Fout bij ophalen nieuws: {e}")
     return items
 
 async def post_new(label, channel_id, fetch_func, state_key, color):
@@ -148,5 +154,39 @@ async def on_ready():
         print("✅ Slash commands gesynchroniseerd")
     except Exception as e:
         print("Slash sync fout:", e)
+
+# ===== Slash command =====
+@tree.command(name="get_news", description="Haal een specifiek nieuwsbericht op (1=nieuwste)")
+@app_commands.describe(game="cod of bf", nummer="1 = nieuwste, 2 = vorige, enz.")
+async def get_news(interaction: discord.Interaction, game: str, nummer: app_commands.Range[int, 1, 10]):
+    game = game.lower()
+    if game not in ["cod", "bf"]:
+        await interaction.response.send_message("❌ Ongeldig spel. Kies 'cod' of 'bf'.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True)
+
+    if game == "cod":
+        items = await fetch_cod_news(limit=nummer)
+        kleur = discord.Color.orange()
+    else:
+        items = await fetch_bf_news(limit=nummer)
+        kleur = discord.Color.blue()
+
+    if not items or len(items) < nummer:
+        await interaction.followup.send("⚠️ Geen nieuwsbericht gevonden.")
+        return
+
+    t = items[nummer - 1]
+    embed = discord.Embed(
+        title=f"{game.upper()} Nieuws #{nummer}",
+        description=t['text'],
+        url=t['url'],
+        color=kleur,
+        timestamp=t['time']
+    )
+    if t.get("media"):
+        embed.set_image(url=t["media"])
+    await interaction.followup.send(embed=embed)
 
 bot.run(TOKEN)
