@@ -10,21 +10,22 @@ from discord import app_commands
 from dotenv import load_dotenv
 
 # ===== .env laden =====
-env_path = Path(__file__).with_name('.env')
-load_dotenv(dotenv_path=env_path)
+# Lokaal: leest .env bestand
+# Online (Railway): gebruikt automatisch Railway Variables
+load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID_COD = int(os.getenv("CHANNEL_ID_COD", "0"))
-CHANNEL_ID_BF  = int(os.getenv("CHANNEL_ID_BF",  "0"))
+CHANNEL_ID_BF  = int(os.getenv("CHANNEL_ID_BF", "0"))
 
 FOLLOW_COD = os.getenv("FOLLOW_ACCOUNT_COD", "CODUpdates").lstrip("@")
-FOLLOW_BF  = os.getenv("FOLLOW_ACCOUNT_BF",  "Battlefield").lstrip("@")
+FOLLOW_BF  = os.getenv("FOLLOW_ACCOUNT_BF", "Battlefield").lstrip("@")
 
 NITTER_SOURCES = [s.strip() for s in os.getenv("NITTER_SOURCES", "https://nitter.net").split(",") if s.strip()]
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "180"))
 
 if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN ontbreekt in .env / Railway Variables")
+    raise RuntimeError("DISCORD_TOKEN ontbreekt in .env of Railway Variables")
 
 STATE_FILE = "last_seen.json"  # {"COD": last_id, "BF": last_id}
 
