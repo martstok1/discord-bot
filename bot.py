@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 import discord
@@ -41,7 +42,7 @@ state = load_state()
 state.setdefault("COD", None)
 
 # ===== COD via RSS =====
-async def fetch_cod_rss(limit=3):
+async def fetch_cod_rss(limit=1):
     """Haal COD nieuws op via Kotaku RSS"""
     feed_url = "https://kotaku.com/tag/call-of-duty/rss"
     parsed = feedparser.parse(feed_url)
@@ -53,37 +54,63 @@ async def fetch_cod_rss(limit=3):
         # Link opschonen
         clean_link = entry.link.replace("https://editors.", "https://").replace("http://editors.", "http://")
 
+        # Afbeelding zoeken
+        image_url = None
+        if "media_content" in entry:
+            image_url = entry.media_content[0].get("url")
+        elif "content" in entry and entry.content:
+            match = re.search(r'<img[^>]+src="([^">]+)"', entry.content[0].value)
+            if match:
+                image_url = match.group(1)
+
         items.append({
             "id": clean_link,
             "url": clean_link,
             "text": entry.title,
-            "time": ts
+            "time": ts,
+            "image": image_url
         })
+
     return items
 
+# ===== post nieuwe COD update =====
 async def post_new_cod():
-    channel = bot.get_channel(CHANNEL_ID_COD)
-    if not channel:
-        return
-
-    items = await fetch_cod_rss(limit=3)
+    items = await fetch_cod_rss(limit=1)  # Alleen nieuwste ophalen
     if not items:
         return
 
+    latest_item = items[0]
     last_seen = state.get("COD")
-    for t in sorted(items, key=lambda x: x["time"]):
-        if last_seen != t["id"]:  # Alleen posten als het nieuw is
+
+    # Eerste keer alleen onthouden
+    if last_seen is None:
+        state["COD"] = latest_item["id"]
+        save_state(state)
+        print("[INFO] Eerste start: laatste artikel onthouden, geen post.")
+        return
+
+    # Alleen posten als het nieuw is
+    if latest_item["id"] != last_seen:
+        channel = bot.get_channel(CHANNEL_ID_COD)
+        if channel:
             embed = discord.Embed(
                 title="COD Update",
-                description=t['text'],
-                url=t['url'],
+                description=latest_item['text'],
+                url=latest_item['url'],
                 color=discord.Color.orange(),
-                timestamp=t['time']
+                timestamp=latest_item['time']
             )
             embed.set_footer(text="Bron: Kotaku RSS")
+
+            # Afbeelding toevoegen
+            if latest_item.get("image"):
+                embed.set_image(url=latest_item["image"])
+
             await channel.send(embed=embed)
-            state["COD"] = t["id"]
-            save_state(state)
+
+        state["COD"] = latest_item["id"]
+        save_state(state)
+        print("[INFO] Nieuw artikel gepost.")
 
 # ===== test command =====
 @tree.command(name="cod_last", description="Laatste COD nieuwsbericht")
@@ -101,6 +128,10 @@ async def cod_last(interaction: discord.Interaction):
         timestamp=t['time']
     )
     embed.set_footer(text="Bron: Kotaku RSS")
+
+    if t.get("image"):
+        embed.set_image(url=t["image"])
+
     await interaction.response.send_message(embed=embed)
 
 # ===== background loop =====
