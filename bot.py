@@ -129,6 +129,29 @@ async def post_new(label: str, channel_id: int, account: str, state_key: str, co
             except Exception as e:
                 print("Post error:", e)
 
+async def post_last_n(label: str, channel_id: int, account: str, color: discord.Color, n: int):
+    """Forceer het posten van de laatste n berichten (ongeacht last_seen)"""
+    if not channel_id:
+        return
+    channel = bot.get_channel(channel_id)
+    if not channel:
+        return
+    items = await fetch_latest(account, limit=n)
+    if not items:
+        return
+    for t in reversed(items):  # Oud → nieuw
+        embed = discord.Embed(
+            title=f"{label} Update — @{account}",
+            description=t['text'],
+            url=t['url'],
+            color=color,
+            timestamp=t['time']
+        )
+        embed.set_footer(text="Bron: X (Twitter)")
+        if t.get("media"):
+            embed.set_image(url=t["media"])
+        await channel.send(embed=embed)
+
 # ===== background loop =====
 @tasks.loop(seconds=POLL_SECONDS)
 async def poll_loop():
@@ -148,17 +171,17 @@ async def on_ready():
         print("Slash sync fout:", e)
 
 # ===== slash commands =====
-@tree.command(name="cod_force", description="Forceer nu een check voor COD-updates")
+@tree.command(name="cod_force", description="Post de laatste 3 COD-updates")
 async def cod_force(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
-    await post_new("COD", CHANNEL_ID_COD, FOLLOW_COD, "COD", discord.Color.from_str("#FFB300"))
-    await interaction.followup.send("✅ COD check uitgevoerd.")
+    await post_last_n("COD", CHANNEL_ID_COD, FOLLOW_COD, discord.Color.from_str("#FFB300"), 3)
+    await interaction.followup.send("✅ Laatste 3 COD-updates gepost.")
 
-@tree.command(name="bf_force", description="Forceer nu een check voor Battlefield-updates")
+@tree.command(name="bf_force", description="Post de laatste 3 Battlefield-updates")
 async def bf_force(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
-    await post_new("Battlefield", CHANNEL_ID_BF, FOLLOW_BF, "BF", discord.Color.from_str("#1E90FF"))
-    await interaction.followup.send("✅ BF check uitgevoerd.")
+    await post_last_n("Battlefield", CHANNEL_ID_BF, FOLLOW_BF, discord.Color.from_str("#1E90FF"), 3)
+    await interaction.followup.send("✅ Laatste 3 Battlefield-updates gepost.")
 
 @tree.command(name="cod_get", description="Haal een eerdere COD-post op (1=nieuwste, 2=vorige, ...)")
 @app_commands.describe(nummer="1 = nieuwste, 2 = vorige, 3 = twee eerder (max 10)")
