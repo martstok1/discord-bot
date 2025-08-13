@@ -42,7 +42,7 @@ state = load_state()
 state.setdefault("COD", None)
 
 # ===== COD via RSS =====
-async def fetch_cod_rss(limit=1):
+async def fetch_cod_rss(limit=3):
     """Haal COD nieuws op via Kotaku RSS"""
     feed_url = "https://kotaku.com/tag/call-of-duty/rss"
     parsed = feedparser.parse(feed_url)
@@ -50,18 +50,14 @@ async def fetch_cod_rss(limit=1):
 
     for entry in parsed.entries[:limit]:
         ts = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+        clean_link = entry.link
 
-        # Link opschonen
-        clean_link = entry.link.replace("https://editors.", "https://").replace("http://editors.", "http://")
-
-        # Afbeelding zoeken
+        # Probeer afbeelding te vinden
         image_url = None
-        if "media_content" in entry:
-            image_url = entry.media_content[0].get("url")
-        elif "content" in entry and entry.content:
-            match = re.search(r'<img[^>]+src="([^">]+)"', entry.content[0].value)
-            if match:
-                image_url = match.group(1)
+        if 'media_content' in entry and len(entry.media_content) > 0:
+            image_url = entry.media_content[0].get('url')
+        elif 'media_thumbnail' in entry and len(entry.media_thumbnail) > 0:
+            image_url = entry.media_thumbnail[0].get('url')
 
         items.append({
             "id": clean_link,
@@ -72,6 +68,7 @@ async def fetch_cod_rss(limit=1):
         })
 
     return items
+
 
 # ===== post nieuwe COD update =====
 async def post_new_cod():
@@ -101,16 +98,15 @@ async def post_new_cod():
                 timestamp=latest_item['time']
             )
             embed.set_footer(text="Bron: Kotaku RSS")
-
-            # Afbeelding toevoegen
-            if latest_item.get("image"):
-                embed.set_image(url=latest_item["image"])
+            if latest_item.get('image'):
+                embed.set_image(url=latest_item['image'])
 
             await channel.send(embed=embed)
 
         state["COD"] = latest_item["id"]
         save_state(state)
         print("[INFO] Nieuw artikel gepost.")
+
 
 # ===== test command =====
 @tree.command(name="cod_last", description="Laatste COD nieuwsbericht")
